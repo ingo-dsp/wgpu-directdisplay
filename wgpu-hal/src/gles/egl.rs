@@ -3,6 +3,11 @@ use once_cell::sync::Lazy;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use std::{collections::HashMap, ffi, os::raw, ptr, rc::Rc, sync::Arc, time::Duration};
+use std::ops::DerefMut;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use drm::control::{Mode, ModeTypeFlags};
+use gbm::AsRaw;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// The amount of time to wait while trying to obtain a lock to the adapter context
 const CONTEXT_LOCK_TIMEOUT_SECS: u64 = 1;
@@ -18,6 +23,8 @@ const EGL_PLATFORM_ANGLE_DEBUG_LAYERS_ENABLED: u32 = 0x3451;
 const EGL_PLATFORM_SURFACELESS_MESA: u32 = 0x31DD;
 const EGL_GL_COLORSPACE_KHR: u32 = 0x309D;
 const EGL_GL_COLORSPACE_SRGB_KHR: u32 = 0x3089;
+
+const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
 
 type XOpenDisplayFun =
     unsafe extern "system" fn(display_name: *const raw::c_char) -> *mut raw::c_void;
@@ -113,13 +120,18 @@ unsafe extern "system" fn egl_debug_proc(
 enum DisplayRef {
     X11(ptr::NonNull<raw::c_void>),
     Wayland,
+    Gbm {
+        card: Arc<DrmCard>,
+        device: gbm::Device<Arc<DrmCard>>
+    }
 }
 
 impl DisplayRef {
     /// Convenience for getting the underlying pointer
     fn as_ptr(&self) -> *mut raw::c_void {
-        match *self {
+        match self {
             Self::X11(ptr) => ptr.as_ptr(),
+            Self::Gbm { device, .. } => device.as_raw() as *mut raw::c_void,
             Self::Wayland => unreachable!(),
         }
     }
@@ -132,21 +144,96 @@ impl DisplayRef {
 /// associated file descriptors
 #[derive(Debug)]
 struct DisplayOwner {
-    library: libloading::Library,
+    library: Option<libloading::Library>,
     display: DisplayRef,
 }
 
 impl Drop for DisplayOwner {
     fn drop(&mut self) {
-        match self.display {
+        match &self.display {
             DisplayRef::X11(ptr) => unsafe {
                 let func: libloading::Symbol<XCloseDisplayFun> =
-                    self.library.get(b"XCloseDisplay").unwrap();
+                    self.library.as_ref().unwrap().get(b"XCloseDisplay").unwrap();
                 func(ptr.as_ptr());
             },
+            DisplayRef::Gbm { device , .. } => {
+                // TODO: Close device?
+            }
             DisplayRef::Wayland => {}
         }
     }
+}
+
+use drm::control::Device;
+#[derive(Debug)]
+pub struct DrmCard(std::fs::File);
+impl AsFd for DrmCard {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+impl DrmCard {
+    pub fn open(path: &str) -> Self {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        options.write(true);
+        DrmCard(options.open(path).unwrap())
+    }
+}
+impl drm::Device for DrmCard {}
+impl drm::control::Device for DrmCard {}
+
+fn open_gbm_display() -> Option<DisplayOwner> {
+
+    // TODO This is really hacky! How to get the device name the right way?
+    for i in 0..10 {
+        let device_name = format!("/dev/dri/card{i}");
+
+        let card = Arc::new(DrmCard::open("/dev/dri/card0"));
+        let res = card
+            .resource_handles()
+            .expect("Could not load normal resource ids.");
+        let coninfo: Vec<drm::control::connector::Info> = res
+            .connectors()
+            .iter()
+            .flat_map(|con| card.get_connector(*con, true))
+            .collect();
+
+        // Filter each connector until we find one that's connected.
+        let Some(con) = coninfo
+            .iter()
+            .find(|&i| i.state() == drm::control::connector::State::Connected) else { continue; };
+
+
+        // find preferred mode or the highest resolution mode
+        let Some(&mode) = con.modes().iter()
+            .find(|x| x.mode_type().contains(ModeTypeFlags::PREFERRED))
+            .or_else(|| con.modes().iter().max_by_key(|x| {
+                let (w, h) = x.size();
+                w * h
+            }))
+            else { continue; };
+
+        let Some(crdt) = con.current_encoder()
+            .and_then(|handle| card.get_encoder(handle).ok())
+            .and_then(|x| x.crtc())
+            .or_else(||
+            con.encoders().iter()
+                .find_map(|x| card.get_encoder(*x).ok().and_then(|x| x.crtc()))
+            )
+            else { continue; };
+
+        let Ok(device) = gbm::Device::new(card.clone()) else { continue; };
+
+
+        unsafe {
+            return Some(DisplayOwner {
+                display: DisplayRef::Gbm { card, device },
+                library: None,
+            })
+        }
+    }
+    None
 }
 
 fn open_x_display() -> Option<DisplayOwner> {
@@ -157,7 +244,7 @@ fn open_x_display() -> Option<DisplayOwner> {
         let result = func(ptr::null());
         ptr::NonNull::new(result).map(|ptr| DisplayOwner {
             display: DisplayRef::X11(ptr),
-            library,
+            library: Some(library),
         })
     }
 }
@@ -188,7 +275,7 @@ fn test_wayland_display() -> Option<DisplayOwner> {
         find_library(&["libwayland-egl.so.1", "libwayland-egl.so"])?
     };
     Some(DisplayOwner {
-        library,
+        library: Some(library),
         display: DisplayRef::Wayland,
     })
 }
@@ -677,6 +764,7 @@ enum WindowKind {
     Wayland,
     X11,
     AngleX11,
+    GBM,
     Unknown,
 }
 
@@ -766,6 +854,12 @@ impl crate::Instance for Instance {
             client_ext_str.split_whitespace().collect::<Vec<_>>()
         );
 
+        let gbm_library = if client_ext_str.contains("EGL_MESA_platform_gbm") {
+            open_gbm_display()
+        } else {
+            None
+        };
+
         let wayland_library = if client_ext_str.contains("EGL_EXT_platform_wayland") {
             test_wayland_display()
         } else {
@@ -789,7 +883,19 @@ impl crate::Instance for Instance {
         let egl1_5: Option<&Arc<EglInstance>> = Some(&egl);
 
         let (display, display_owner, wsi_kind) =
-            if let (Some(library), Some(egl)) = (wayland_library, egl1_5) {
+            if let (Some(display_owner), Some(egl)) = (gbm_library, egl1_5) {
+                log::info!("Using GBM platform");
+                let display_attributes = [khronos_egl::ATTRIB_NONE];
+                let display = unsafe {
+                    egl.get_platform_display(
+                        EGL_PLATFORM_GBM_KHR,
+                        khronos_egl::DEFAULT_DISPLAY,
+                        &display_attributes,
+                    )
+                }
+                    .unwrap();
+                (display, Some(Rc::new(display_owner)), WindowKind::GBM)
+            } else if let (Some(library), Some(egl)) = (wayland_library, egl1_5) {
                 log::info!("Using Wayland platform");
                 let display_attributes = [khronos_egl::ATTRIB_NONE];
                 let display = unsafe {
@@ -975,6 +1081,50 @@ impl crate::Instance for Instance {
             }
             #[cfg(Emscripten)]
             (Rwh::Web(_), _) => {}
+            (RawWindowHandle::Gbm(window_handle), RawDisplayHandle::Gbm(display_handle)) => {
+                if inner
+                    .wl_display
+                    .map(|ptr| ptr != display_handle.gbm_device.as_ptr())
+                    .unwrap_or(true)
+                {
+                    /* Wayland displays are not sharable between surfaces so if the
+                     * surface we receive from this handle is from a different
+                     * display, we must re-initialize the context.
+                     *
+                     * See gfx-rs/gfx#3545
+                     */
+                    log::warn!("Re-initializing GBM context");
+
+                    use std::ops::DerefMut;
+                    let display_attributes = [khronos_egl::ATTRIB_NONE];
+
+                    let display = unsafe {
+                        inner
+                            .egl
+                            .instance
+                            .upcast::<khronos_egl::EGL1_5>()
+                            .unwrap()
+                            .get_platform_display(
+                                EGL_PLATFORM_GBM_KHR,
+                                display_handle.gbm_device.as_ptr(),
+                                &display_attributes,
+                            )
+                    }
+                        .unwrap();
+
+                    let new_inner = Inner::create(
+                        self.flags,
+                        Arc::clone(&inner.egl.instance),
+                        display,
+                        inner.force_gles_minor_version,
+                    )?;
+
+                    let old_inner = std::mem::replace(inner.deref_mut(), new_inner);
+                    inner.wl_display = Some(display_handle.gbm_device.as_ptr());
+
+                    drop(old_inner);
+                }
+            }
             other => {
                 return Err(crate::InstanceError::new(format!(
                     "unsupported window: {other:?}"
@@ -1220,6 +1370,9 @@ impl crate::Surface for Surface {
                 let (mut temp_xlib_handle, mut temp_xcb_handle);
                 #[allow(trivial_casts)]
                 let native_window_ptr = match (self.wsi.kind, self.raw_window_handle) {
+                    (WindowKind::GBM, Rwh::Gbm(handle)) => {
+                        handle.gbm_surface.as_ptr()
+                    }
                     (WindowKind::Unknown | WindowKind::X11, Rwh::Xlib(handle)) => {
                         temp_xlib_handle = handle.window;
                         &mut temp_xlib_handle as *mut _ as *mut std::ffi::c_void
@@ -1238,7 +1391,7 @@ impl crate::Surface for Surface {
                         handle.a_native_window.as_ptr()
                     }
                     (WindowKind::Wayland, Rwh::Wayland(handle)) => {
-                        let library = &self.wsi.display_owner.as_ref().unwrap().library;
+                        let library = &self.wsi.display_owner.as_ref().unwrap().library.as_ref().unwrap();
                         let wl_egl_window_create: libloading::Symbol<WlEglWindowCreateFun> =
                             unsafe { library.get(b"wl_egl_window_create") }.unwrap();
                         let window =
@@ -1347,7 +1500,7 @@ impl crate::Surface for Surface {
         };
 
         if let Some(window) = wl_window {
-            let library = &self.wsi.display_owner.as_ref().unwrap().library;
+            let library = self.wsi.display_owner.as_ref().unwrap().library.as_ref().unwrap();
             let wl_egl_window_resize: libloading::Symbol<WlEglWindowResizeFun> =
                 unsafe { library.get(b"wl_egl_window_resize") }.unwrap();
             unsafe {
@@ -1414,12 +1567,14 @@ impl crate::Surface for Surface {
                 .destroy_surface(self.egl.display, surface)
                 .unwrap();
             if let Some(window) = wl_window {
-                let library = &self
+                let library = self
                     .wsi
                     .display_owner
                     .as_ref()
                     .expect("unsupported window")
-                    .library;
+                    .library
+                    .as_ref()
+                    .unwrap();
                 let wl_egl_window_destroy: libloading::Symbol<WlEglWindowDestroyFun> =
                     unsafe { library.get(b"wl_egl_window_destroy") }.unwrap();
                 unsafe { wl_egl_window_destroy(window) };
