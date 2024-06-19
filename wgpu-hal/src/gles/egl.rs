@@ -3,10 +3,12 @@ use once_cell::sync::Lazy;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use std::{collections::HashMap, ffi, os::raw, ptr, rc::Rc, sync::Arc, time::Duration};
+use std::marker::PhantomData;
 use std::ops::DerefMut;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use drm::buffer::DrmFourcc;
 use drm::control::{Mode, ModeTypeFlags};
-use gbm::AsRaw;
+use gbm::{AsRaw, BufferObjectFlags};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// The amount of time to wait while trying to obtain a lock to the adapter context
@@ -120,10 +122,7 @@ unsafe extern "system" fn egl_debug_proc(
 enum DisplayRef {
     X11(ptr::NonNull<raw::c_void>),
     Wayland,
-    Gbm {
-        card: Arc<DrmCard>,
-        device: gbm::Device<Arc<DrmCard>>
-    }
+    Gbm(ptr::NonNull<raw::c_void>),
 }
 
 impl DisplayRef {
@@ -131,7 +130,7 @@ impl DisplayRef {
     fn as_ptr(&self) -> *mut raw::c_void {
         match self {
             Self::X11(ptr) => ptr.as_ptr(),
-            Self::Gbm { device, .. } => device.as_raw() as *mut raw::c_void,
+            Self::Gbm(ptr) => ptr.as_ptr(),
             Self::Wayland => unreachable!(),
         }
     }
@@ -156,7 +155,7 @@ impl Drop for DisplayOwner {
                     self.library.as_ref().unwrap().get(b"XCloseDisplay").unwrap();
                 func(ptr.as_ptr());
             },
-            DisplayRef::Gbm { device , .. } => {
+            DisplayRef::Gbm(ptr) => {
                 // TODO: Close device?
             }
             DisplayRef::Wayland => {}
@@ -188,49 +187,15 @@ fn open_gbm_display() -> Option<DisplayOwner> {
     // TODO This is really hacky! How to get the device name the right way?
     for i in 0..10 {
         let device_name = format!("/dev/dri/card{i}");
-
-        let card = Arc::new(DrmCard::open("/dev/dri/card0"));
-        let res = card
-            .resource_handles()
-            .expect("Could not load normal resource ids.");
-        let coninfo: Vec<drm::control::connector::Info> = res
-            .connectors()
-            .iter()
-            .flat_map(|con| card.get_connector(*con, true))
-            .collect();
-
-        // Filter each connector until we find one that's connected.
-        let Some(con) = coninfo
-            .iter()
-            .find(|&i| i.state() == drm::control::connector::State::Connected) else { continue; };
-
-
-        // find preferred mode or the highest resolution mode
-        let Some(&mode) = con.modes().iter()
-            .find(|x| x.mode_type().contains(ModeTypeFlags::PREFERRED))
-            .or_else(|| con.modes().iter().max_by_key(|x| {
-                let (w, h) = x.size();
-                w * h
-            }))
-            else { continue; };
-
-        let Some(crdt) = con.current_encoder()
-            .and_then(|handle| card.get_encoder(handle).ok())
-            .and_then(|x| x.crtc())
-            .or_else(||
-            con.encoders().iter()
-                .find_map(|x| card.get_encoder(*x).ok().and_then(|x| x.crtc()))
-            )
-            else { continue; };
-
-        let Ok(device) = gbm::Device::new(card.clone()) else { continue; };
-
-
+        let card = Arc::new(DrmCard::open(&device_name));
+        let device = gbm::Device::new(card).expect("failed to initialize GBM");
         unsafe {
-            return Some(DisplayOwner {
-                display: DisplayRef::Gbm { card, device },
-                library: None,
-            })
+            if let Some(ptr) = std::ptr::NonNull::new(device.as_raw() as *mut std::ffi::c_void) {
+                return Some(DisplayOwner {
+                    display: DisplayRef::Gbm(ptr),
+                    library: None
+                });
+            }
         }
     }
     None
@@ -1087,12 +1052,6 @@ impl crate::Instance for Instance {
                     .map(|ptr| ptr != display_handle.gbm_device.as_ptr())
                     .unwrap_or(true)
                 {
-                    /* Wayland displays are not sharable between surfaces so if the
-                     * surface we receive from this handle is from a different
-                     * display, we must re-initialize the context.
-                     *
-                     * See gfx-rs/gfx#3545
-                     */
                     log::warn!("Re-initializing GBM context");
 
                     use std::ops::DerefMut;
@@ -1142,6 +1101,7 @@ impl crate::Instance for Instance {
             raw_window_handle: window_handle,
             swapchain: RwLock::new(None),
             srgb_kind: inner.srgb_kind,
+            gbm_previous_fb: RwLock::new(None),
         })
     }
 
@@ -1247,6 +1207,7 @@ pub struct Surface {
     raw_window_handle: raw_window_handle::RawWindowHandle,
     swapchain: RwLock<Option<Swapchain>>,
     srgb_kind: SrgbFrameBufferKind,
+    gbm_previous_fb: RwLock<Option<gbm::BufferObject<()>>>,
 }
 
 unsafe impl Send for Surface {}
@@ -1319,6 +1280,9 @@ impl Surface {
                 crate::SurfaceError::Lost
                 // TODO: should we unset the current context here?
             })?;
+
+        self.after_egl_swap_buffer();
+
         self.egl
             .instance
             .make_current(self.egl.display, None, None, None)
@@ -1327,7 +1291,29 @@ impl Surface {
                 crate::SurfaceError::Lost
             })?;
 
+
         Ok(())
+    }
+
+    // BINGO: Added for GBM support
+    fn after_egl_swap_buffer(&self) {
+        let RawWindowHandle::Gbm(raw_window_handle::GbmWindowHandle { gbm_surface, .. }) = self.raw_window_handle else { return; };
+        let Some(display) = &self.wsi.display_owner else { return; };
+        let DisplayRef::Gbm(display_ptr) = &display.display else { return; };
+
+        unsafe {
+            let surface_ptr = gbm_surface.as_ptr() as *mut gbm::ffi::gbm_surface;
+            let bo = unsafe { gbm::ffi::gbm_surface_lock_front_buffer(surface_ptr) }
+            drm_ffi::mode::add_fb();
+        };
+        // let fb = device.add_framebuffer(&bo, 24, 32).unwrap();
+        // device.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode));
+        // let prev = self.gbm_previous_fb.write();
+        // if let Some(previous) = prev.take() {
+        //     device.destroy_framebuffer(previous);
+        //     // gbm_surface.
+        // }
+        // *prev = Some(fb);
     }
 
     unsafe fn unconfigure_impl(

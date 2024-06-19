@@ -99,6 +99,7 @@ raw-window-handle = "0.6"
 thiserror = "1"
 once_cell = "1.19.0"
 drm = "0.12"
+drm-ffi = "0.8"
 gbm = { version = "0.15", default-features = false, features = ["import-egl", "drm-support"] }
 
 
