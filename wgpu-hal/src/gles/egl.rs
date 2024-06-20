@@ -5,10 +5,9 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::{collections::HashMap, ffi, os::raw, ptr, rc::Rc, sync::Arc, time::Duration};
 use std::marker::PhantomData;
 use std::ops::DerefMut;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
-use drm::buffer::DrmFourcc;
-use drm::control::{Mode, ModeTypeFlags};
-use gbm::{AsRaw, BufferObjectFlags};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use drm::control::Device;
+use gbm_sys::gbm_device;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// The amount of time to wait while trying to obtain a lock to the adapter context
@@ -122,7 +121,7 @@ unsafe extern "system" fn egl_debug_proc(
 enum DisplayRef {
     X11(ptr::NonNull<raw::c_void>),
     Wayland,
-    Gbm(ptr::NonNull<raw::c_void>),
+    Gbm,
 }
 
 impl DisplayRef {
@@ -130,7 +129,7 @@ impl DisplayRef {
     fn as_ptr(&self) -> *mut raw::c_void {
         match self {
             Self::X11(ptr) => ptr.as_ptr(),
-            Self::Gbm(ptr) => ptr.as_ptr(),
+            Self::Gbm => panic!(),
             Self::Wayland => unreachable!(),
         }
     }
@@ -155,50 +154,10 @@ impl Drop for DisplayOwner {
                     self.library.as_ref().unwrap().get(b"XCloseDisplay").unwrap();
                 func(ptr.as_ptr());
             },
-            DisplayRef::Gbm(ptr) => {
-                // TODO: Close device?
-            }
+            DisplayRef::Gbm => {}
             DisplayRef::Wayland => {}
         }
     }
-}
-
-use drm::control::Device;
-#[derive(Debug)]
-pub struct DrmCard(std::fs::File);
-impl AsFd for DrmCard {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
-    }
-}
-impl DrmCard {
-    pub fn open(path: &str) -> Self {
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        options.write(true);
-        DrmCard(options.open(path).unwrap())
-    }
-}
-impl drm::Device for DrmCard {}
-impl drm::control::Device for DrmCard {}
-
-fn open_gbm_display() -> Option<DisplayOwner> {
-
-    // TODO This is really hacky! How to get the device name the right way?
-    for i in 0..10 {
-        let device_name = format!("/dev/dri/card{i}");
-        let card = Arc::new(DrmCard::open(&device_name));
-        let device = gbm::Device::new(card).expect("failed to initialize GBM");
-        unsafe {
-            if let Some(ptr) = std::ptr::NonNull::new(device.as_raw() as *mut std::ffi::c_void) {
-                return Some(DisplayOwner {
-                    display: DisplayRef::Gbm(ptr),
-                    library: None
-                });
-            }
-        }
-    }
-    None
 }
 
 fn open_x_display() -> Option<DisplayOwner> {
@@ -483,6 +442,8 @@ struct Inner {
     force_gles_minor_version: wgt::Gles3MinorVersion,
     /// Method by which the framebuffer should support srgb
     srgb_kind: SrgbFrameBufferKind,
+    #[cfg(feature = "gbm")]
+    gbm_display: Option<*mut raw::c_void>
 }
 
 // Different calls to `eglGetPlatformDisplay` may return the same `Display`, making it a global
@@ -704,6 +665,8 @@ impl Inner {
             wl_display: None,
             srgb_kind,
             force_gles_minor_version,
+            #[cfg(feature = "gbm")]
+            gbm_display: None
         })
     }
 }
@@ -819,11 +782,7 @@ impl crate::Instance for Instance {
             client_ext_str.split_whitespace().collect::<Vec<_>>()
         );
 
-        let gbm_library = if client_ext_str.contains("EGL_MESA_platform_gbm") {
-            open_gbm_display()
-        } else {
-            None
-        };
+        let gbm_support = cfg!(feature = "gbm") && client_ext_str.contains("EGL_MESA_platform_gbm");
 
         let wayland_library = if client_ext_str.contains("EGL_EXT_platform_wayland") {
             test_wayland_display()
@@ -848,7 +807,7 @@ impl crate::Instance for Instance {
         let egl1_5: Option<&Arc<EglInstance>> = Some(&egl);
 
         let (display, display_owner, wsi_kind) =
-            if let (Some(display_owner), Some(egl)) = (gbm_library, egl1_5) {
+            if let (true, Some(egl)) = (gbm_support, egl1_5) {
                 log::info!("Using GBM platform");
                 let display_attributes = [khronos_egl::ATTRIB_NONE];
                 let display = unsafe {
@@ -856,10 +815,9 @@ impl crate::Instance for Instance {
                         EGL_PLATFORM_GBM_KHR,
                         khronos_egl::DEFAULT_DISPLAY,
                         &display_attributes,
-                    )
-                }
-                    .unwrap();
-                (display, Some(Rc::new(display_owner)), WindowKind::GBM)
+                    ).unwrap()
+                };
+                (display, None, WindowKind::GBM)
             } else if let (Some(library), Some(egl)) = (wayland_library, egl1_5) {
                 log::info!("Using Wayland platform");
                 let display_attributes = [khronos_egl::ATTRIB_NONE];
@@ -868,9 +826,8 @@ impl crate::Instance for Instance {
                         EGL_PLATFORM_WAYLAND_KHR,
                         khronos_egl::DEFAULT_DISPLAY,
                         &display_attributes,
-                    )
-                }
-                .unwrap();
+                    ).unwrap()
+                };
                 (display, Some(Rc::new(library)), WindowKind::Wayland)
             } else if let (Some(display_owner), Some(egl)) = (x11_display_library, egl1_5) {
                 log::info!("Using X11 platform");
@@ -880,9 +837,8 @@ impl crate::Instance for Instance {
                         EGL_PLATFORM_X11_KHR,
                         display_owner.display.as_ptr(),
                         &display_attributes,
-                    )
-                }
-                .unwrap();
+                    ).unwrap()
+                };
                 (display, Some(Rc::new(display_owner)), WindowKind::X11)
             } else if let (Some(display_owner), Some(egl)) = (angle_x11_display_library, egl1_5) {
                 log::info!("Using Angle platform with X11");
@@ -898,9 +854,8 @@ impl crate::Instance for Instance {
                         EGL_PLATFORM_ANGLE_ANGLE,
                         display_owner.display.as_ptr(),
                         &display_attributes,
-                    )
-                }
-                .unwrap();
+                    ).unwrap()
+                };
                 (display, Some(Rc::new(display_owner)), WindowKind::AngleX11)
             } else if client_ext_str.contains("EGL_MESA_platform_surfaceless") {
                 log::warn!("No windowing system present. Using surfaceless platform");
@@ -911,10 +866,8 @@ impl crate::Instance for Instance {
                         EGL_PLATFORM_SURFACELESS_MESA,
                         khronos_egl::DEFAULT_DISPLAY,
                         &[khronos_egl::ATTRIB_NONE],
-                    )
-                }
-                .unwrap();
-
+                    ).unwrap()
+                };
                 (display, None, WindowKind::Unknown)
             } else {
                 log::warn!("EGL_MESA_platform_surfaceless not available. Using default platform");
@@ -1046,13 +999,17 @@ impl crate::Instance for Instance {
             }
             #[cfg(Emscripten)]
             (Rwh::Web(_), _) => {}
-            (RawWindowHandle::Gbm(window_handle), RawDisplayHandle::Gbm(display_handle)) => {
+
+            #[cfg(feature = "gbm")]
+            (RawWindowHandle::Gbm(_), RawDisplayHandle::Gbm(display_handle)) => {
                 if inner
-                    .wl_display
+                    .gbm_display
                     .map(|ptr| ptr != display_handle.gbm_device.as_ptr())
                     .unwrap_or(true)
                 {
-                    log::warn!("Re-initializing GBM context");
+                    if inner.gbm_display.is_some() {
+                        log::warn!("Re-initializing GBM context");
+                    }
 
                     use std::ops::DerefMut;
                     let display_attributes = [khronos_egl::ATTRIB_NONE];
@@ -1067,9 +1024,8 @@ impl crate::Instance for Instance {
                                 EGL_PLATFORM_GBM_KHR,
                                 display_handle.gbm_device.as_ptr(),
                                 &display_attributes,
-                            )
-                    }
-                        .unwrap();
+                            ).unwrap()
+                    };
 
                     let new_inner = Inner::create(
                         self.flags,
@@ -1079,11 +1035,12 @@ impl crate::Instance for Instance {
                     )?;
 
                     let old_inner = std::mem::replace(inner.deref_mut(), new_inner);
-                    inner.wl_display = Some(display_handle.gbm_device.as_ptr());
+                    inner.gbm_display = Some(display_handle.gbm_device.as_ptr());
 
                     drop(old_inner);
                 }
             }
+
             other => {
                 return Err(crate::InstanceError::new(format!(
                     "unsupported window: {other:?}"
@@ -1099,9 +1056,15 @@ impl crate::Instance for Instance {
             config: inner.config,
             presentable: inner.supports_native_window,
             raw_window_handle: window_handle,
+            raw_display_handle: display_handle,
             swapchain: RwLock::new(None),
             srgb_kind: inner.srgb_kind,
-            gbm_previous_fb: RwLock::new(None),
+            #[cfg(feature = "gbm")]
+            drm_info: inner.gbm_display.map(|x| {
+                let gbm_device = x as *mut gbm_device;
+                let drm = drm_util::Drm { fd: gbm_sys::gbm_device_get_fd(gbm_device) as RawFd };
+                drm_util::DrmInfo::new(drm)
+            })
         })
     }
 
@@ -1205,9 +1168,11 @@ pub struct Surface {
     config: khronos_egl::Config,
     pub(super) presentable: bool,
     raw_window_handle: raw_window_handle::RawWindowHandle,
+    raw_display_handle: raw_window_handle::RawDisplayHandle,
     swapchain: RwLock<Option<Swapchain>>,
     srgb_kind: SrgbFrameBufferKind,
-    gbm_previous_fb: RwLock<Option<gbm::BufferObject<()>>>,
+    #[cfg(feature = "gbm")]
+    drm_info: Option<drm_util::DrmInfo>
 }
 
 unsafe impl Send for Surface {}
@@ -1295,25 +1260,42 @@ impl Surface {
         Ok(())
     }
 
-    // BINGO: Added for GBM support
     fn after_egl_swap_buffer(&self) {
-        let RawWindowHandle::Gbm(raw_window_handle::GbmWindowHandle { gbm_surface, .. }) = self.raw_window_handle else { return; };
-        let Some(display) = &self.wsi.display_owner else { return; };
-        let DisplayRef::Gbm(display_ptr) = &display.display else { return; };
+        match (&self.raw_window_handle, &self.raw_display_handle) {
+            (RawWindowHandle::Gbm(window_handle), RawDisplayHandle::Gbm(display_handle)) => {
+                #[cfg(feature = "gbm")]
+                if let Some(drm_info) = &self.drm_info {
+                    unsafe {
+                        use drm::control::Device;
+                        let device_ptr = display_handle.gbm_device.as_ptr() as *mut gbm_sys::gbm_device;
+                        let surface_ptr = window_handle.gbm_surface.as_ptr() as *mut gbm_sys::gbm_surface;
+                        let bo = gbm_sys::gbm_surface_lock_front_buffer(surface_ptr);
+                        let drm = drm_util::Drm { fd: gbm_sys::gbm_device_get_fd(device_ptr) as RawFd };
+                        let w = gbm_sys::gbm_bo_get_width(bo);
+                        let h = gbm_sys::gbm_bo_get_height(bo);
+                        let fb = drm_ffi::mode::add_fb(
+                            drm.as_fd(),
+                            gbm_sys::gbm_bo_get_width(bo),
+                            gbm_sys::gbm_bo_get_height(bo),
+                            gbm_sys::gbm_bo_get_stride(bo),
+                            32, //gbm_sys::gbm_bo_get_bpp(bo),
+                            24,
+                            gbm_sys::gbm_bo_get_handle(bo).u32_
+                        ).expect("add_fb").fb_id as u32;
+                        let fb_handle = drm::control::framebuffer::Handle::from(drm::control::RawResourceHandle::new(fb).unwrap());
+                        let drm_util::DrmInfo { crtc, mode, connector, previous_fb} = drm_info;
+                        drm.set_crtc(*crtc, Some(fb_handle), (0, 0), &[*connector], Some(*mode));
+                        if let Some(previous_fb) = *previous_fb.read() {
+                            drm.destroy_framebuffer(previous_fb);
+                        }
+                        let x: &mut Option<_> = &mut previous_fb.write();
+                        *x = Some(fb_handle);
+                    };
+                }
+            }
+            _ => {}
+        }
 
-        unsafe {
-            let surface_ptr = gbm_surface.as_ptr() as *mut gbm::ffi::gbm_surface;
-            let bo = unsafe { gbm::ffi::gbm_surface_lock_front_buffer(surface_ptr) }
-            drm_ffi::mode::add_fb();
-        };
-        // let fb = device.add_framebuffer(&bo, 24, 32).unwrap();
-        // device.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode));
-        // let prev = self.gbm_previous_fb.write();
-        // if let Some(previous) = prev.take() {
-        //     device.destroy_framebuffer(previous);
-        //     // gbm_surface.
-        // }
-        // *prev = Some(fb);
     }
 
     unsafe fn unconfigure_impl(
@@ -1596,4 +1578,76 @@ impl crate::Surface for Surface {
         }))
     }
     unsafe fn discard_texture(&self, _texture: super::Texture) {}
+}
+
+#[cfg(feature = "gbm")]
+mod drm_util {
+    use std::os::fd::{AsFd, BorrowedFd, RawFd};
+    use std::sync::Arc;
+    use crate::gles::egl::drm_util;
+    use drm::control::{Device, Mode};
+    use parking_lot::RwLock;
+
+    pub struct Drm {
+        pub fd: RawFd
+    }
+    impl drm::Device for Drm {}
+    impl drm::control::Device for Drm {}
+    impl AsFd for Drm {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            unsafe { BorrowedFd::borrow_raw(self.fd) }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct DrmInfo {
+        pub mode: drm::control::Mode,
+        pub crtc: drm::control::crtc::Handle,
+        pub connector: drm::control::connector::Handle,
+        pub previous_fb: RwLock<Option<drm::control::framebuffer::Handle>>,
+    }
+    impl DrmInfo {
+        pub fn new(drm: Drm) -> DrmInfo {
+            let res = drm
+                .resource_handles()
+                .expect("Could not load normal resource ids.");
+            let coninfo: Vec<drm::control::connector::Info> = res
+                .connectors()
+                .iter()
+                .flat_map(|con| drm.get_connector(*con, true))
+                .collect();
+
+
+            // Filter each connector until we find one that's connected.
+            let con = coninfo
+                .iter()
+                .find(|&i| i.state() == drm::control::connector::State::Connected)
+                .expect("No connected connectors");
+
+            // find preferred mode or the highest resolution mode
+            let mode = *con.modes().iter()
+                .find(|x| x.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED))
+                .or_else(|| con.modes().iter().max_by_key(|x| {
+                    let (w, h) = x.size();
+                    w * h
+                }))
+                .expect("No modes found on connector");
+
+            let crtc = con.current_encoder()
+                .and_then(|handle| drm.get_encoder(handle).ok())
+                .and_then(|x| x.crtc())
+                .or_else(||
+                con.encoders().iter()
+                    .find_map(|x| drm.get_encoder(*x).ok().and_then(|x| x.crtc()))
+                )
+                .expect("no crtc found!");
+
+            DrmInfo {
+                connector: con.handle(),
+                crtc,
+                mode,
+                previous_fb: RwLock::new(None)
+            }
+        }
+    }
 }
