@@ -1273,20 +1273,22 @@ impl Surface {
                         let drm = drm_util::Drm { fd: gbm_sys::gbm_device_get_fd(device_ptr) as RawFd };
                         let w = gbm_sys::gbm_bo_get_width(bo);
                         let h = gbm_sys::gbm_bo_get_height(bo);
+                        let bpp = gbm_sys::gbm_bo_get_bpp(bo);
                         let fb = drm_ffi::mode::add_fb(
                             drm.as_fd(),
-                            gbm_sys::gbm_bo_get_width(bo),
-                            gbm_sys::gbm_bo_get_height(bo),
+                            w,
+                            h,
                             gbm_sys::gbm_bo_get_stride(bo),
-                            32, //gbm_sys::gbm_bo_get_bpp(bo),
+                            bpp, // 32
                             24,
                             gbm_sys::gbm_bo_get_handle(bo).u32_
                         ).expect("add_fb").fb_id as u32;
                         let fb_handle = drm::control::framebuffer::Handle::from(drm::control::RawResourceHandle::new(fb).unwrap());
                         let drm_util::DrmInfo { crtc, mode, connector, previous_fb} = drm_info;
-                        drm.set_crtc(*crtc, Some(fb_handle), (0, 0), &[*connector], Some(*mode));
-                        if let Some(previous_fb) = previous_fb.write().replace(fb_handle) {
-                            drm.destroy_framebuffer(previous_fb);
+                        drm.set_crtc(*crtc, Some(fb_handle), (0, 0), &[*connector], Some(*mode)).expect("set_crtc");
+                        if let Some((previous_fb, previous_bo)) = previous_fb.write().replace((fb_handle, bo)) {
+                            drm.destroy_framebuffer(previous_fb).expect("destroy_framebuffer");
+                            gbm_sys::gbm_surface_release_buffer(surface_ptr, previous_bo);
                         }
                     };
                 }
@@ -1602,7 +1604,7 @@ mod drm_util {
         pub mode: drm::control::Mode,
         pub crtc: drm::control::crtc::Handle,
         pub connector: drm::control::connector::Handle,
-        pub previous_fb: RwLock<Option<drm::control::framebuffer::Handle>>,
+        pub previous_fb: RwLock<Option<(drm::control::framebuffer::Handle, *mut gbm_sys::gbm_bo)>>,
     }
     impl DrmInfo {
         pub fn new(drm: Drm) -> DrmInfo {
