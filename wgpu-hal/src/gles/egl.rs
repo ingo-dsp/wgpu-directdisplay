@@ -1285,11 +1285,9 @@ impl Surface {
                         let fb_handle = drm::control::framebuffer::Handle::from(drm::control::RawResourceHandle::new(fb).unwrap());
                         let drm_util::DrmInfo { crtc, mode, connector, previous_fb} = drm_info;
                         drm.set_crtc(*crtc, Some(fb_handle), (0, 0), &[*connector], Some(*mode));
-                        if let Some(previous_fb) = *previous_fb.read() {
+                        if let Some(previous_fb) = previous_fb.write().replace(fb_handle) {
                             drm.destroy_framebuffer(previous_fb);
                         }
-                        let x: &mut Option<_> = &mut previous_fb.write();
-                        *x = Some(fb_handle);
                     };
                 }
             }
