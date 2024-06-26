@@ -11,6 +11,7 @@ use ash::{
     vk,
 };
 use parking_lot::RwLock;
+use wgt::DirectDisplayMode;
 
 unsafe extern "system" fn debug_utils_messenger_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -775,6 +776,13 @@ impl crate::Instance<super::Api> for super::Instance {
                 Some(Box::new(())), // `Some` signals that wgpu-hal is in charge of destroying vk_instance
             )
         }
+    }
+
+    unsafe fn create_surface_direct_display(
+        &self,
+        direct_display_mode: DirectDisplayMode,
+    ) -> Result<super::Surface, crate::InstanceError> {
+        panic!()
     }
 
     unsafe fn create_surface(

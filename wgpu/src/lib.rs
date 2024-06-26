@@ -508,6 +508,8 @@ pub enum SurfaceTarget<'window> {
     ///   or declines to provide GPU access (such as due to a resource shortage).
     #[cfg(any(webgpu, webgl))]
     OffscreenCanvas(web_sys::OffscreenCanvas),
+
+    DirectDisplay(DirectDisplayMode),
 }
 
 impl<'a, T> From<T> for SurfaceTarget<'a>
@@ -545,6 +547,8 @@ pub enum SurfaceTargetUnsafe {
         /// Raw display handle, underlying window must outlive the surface created from this.
         raw_window_handle: raw_window_handle::RawWindowHandle,
     },
+
+    DirectDisplay(DirectDisplayMode),
 
     /// Surface from `CoreAnimationLayer`.
     ///
@@ -1981,6 +1985,12 @@ impl Instance {
 
         let target = target.into();
         let mut surface = match target {
+            SurfaceTarget::DirectDisplay(direct_display_mode) => unsafe {
+                handle_source = None;
+                self.create_surface_unsafe(
+                    SurfaceTargetUnsafe::DirectDisplay(direct_display_mode)
+                )?
+            }
             SurfaceTarget::Window(window) => unsafe {
                 let surface = self.create_surface_unsafe(
                     SurfaceTargetUnsafe::from_window(&window).map_err(|e| CreateSurfaceError {
@@ -5181,6 +5191,7 @@ impl fmt::Display for Error {
 }
 
 use send_sync::*;
+use wgt::DirectDisplayMode;
 
 mod send_sync {
     use std::any::Any;
