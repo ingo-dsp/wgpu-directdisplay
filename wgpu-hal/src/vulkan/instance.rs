@@ -261,6 +261,10 @@ impl super::Instance {
         // VK_KHR_surface
         extensions.push(khr::Surface::name());
 
+        /// Direct Display
+        extensions.push(khr::Display::name());
+
+
         // Platform-specific WSI extensions
         if cfg!(all(
             unix,
@@ -861,7 +865,58 @@ impl crate::Instance for super::Instance {
         &self,
         direct_display_mode: DirectDisplayMode,
     ) -> Result<super::Surface, crate::InstanceError> {
-        panic!()
+
+        // TODO replace "expect" and "unwrap" by "return Err(crate::InstanceError::new(...))"
+
+        let DirectDisplayMode {
+            display_index,
+            display_mode_requested_size: (w, h),
+        } = direct_display_mode;
+
+        let pd = self.shared.raw.enumerate_physical_devices().expect("physical devices");
+        let physical_device = pd[0];
+
+        let display = ash::extensions::khr::Display::new(&self.shared.entry, &self.shared.raw);
+        let displays = display.get_physical_device_display_properties(physical_device).expect("get_physical_device_display_properties");
+        assert!(!displays.is_empty(), "No available display");
+
+        let selected_display = *displays.get(display_index).expect("Display {DISPLAY_IDX} does not exist");
+
+        let modes = display.get_display_mode_properties(physical_device, selected_display.display)
+            .expect("get_display_mode_properties");
+        assert!(!modes.is_empty(), "No available modes");
+
+        // TODO: Do not just select the first mode, but try to match width and height!
+        let selected_mode = modes.get(0).expect("Requested mode does not exist");
+
+        let planes = display.get_physical_device_display_plane_properties(physical_device)
+            .expect("get_physical_device_display_plane_properties");
+        assert!(!planes.is_empty(), "No available planes");
+
+        const PLANE_ID: usize = 0;
+        let _ = planes.get(PLANE_ID).expect("No planes exist");
+        let display_mode = display.create_display_mode(
+            physical_device,
+            selected_display.display,
+            &ash::vk::DisplayModeCreateInfoKHR::builder()
+                .parameters(selected_mode.parameters)
+                .build(),
+            None
+        ).expect("create_display_mode");
+
+        let surface = display.create_display_plane_surface(
+            &ash::vk::DisplaySurfaceCreateInfoKHR::builder()
+                .plane_index(PLANE_ID as u32)
+                .display_mode(display_mode)
+                .image_extent(selected_mode.parameters.visible_region)
+                .build(),
+            None
+        ).expect("create_display_plane_surface");
+
+        // let width = selected_mode.parameters.visible_region.width;
+        // let height = selected_mode.parameters.visible_region.height;
+
+        Ok(self.create_surface_from_vk_surface_khr(surface))
     }
 
     unsafe fn create_surface(
