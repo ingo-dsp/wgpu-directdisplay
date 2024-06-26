@@ -1,6 +1,9 @@
 #![allow(unused_variables)]
 
 use std::ops::Range;
+use wgt::DirectDisplayMode;
+use crate::InstanceError;
+use crate::vulkan::Surface;
 
 #[derive(Clone, Debug)]
 pub struct Api;
@@ -49,6 +52,12 @@ impl crate::Instance for Context {
         &self,
         _display_handle: raw_window_handle::RawDisplayHandle,
         _window_handle: raw_window_handle::RawWindowHandle,
+    ) -> Result<Context, crate::InstanceError> {
+        Ok(Context)
+    }
+    unsafe fn create_surface_direct_display(
+        &self,
+        mode: DirectDisplayMode
     ) -> Result<Context, crate::InstanceError> {
         Ok(Context)
     }

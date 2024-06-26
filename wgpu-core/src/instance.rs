@@ -14,7 +14,7 @@ use crate::{
     resource_log, LabelHelpers, DOWNLEVEL_WARNING_MESSAGE,
 };
 
-use wgt::{Backend, Backends, PowerPreference};
+use wgt::{Backend, Backends, DirectDisplayMode, PowerPreference};
 
 use hal::{Adapter as _, Instance as _, OpenDevice};
 use thiserror::Error;
@@ -570,6 +570,61 @@ impl Global {
                 display_handle,
                 window_handle,
             ),
+        };
+
+        if any_created {
+            #[allow(clippy::arc_with_non_send_sync)]
+            let (id, _) = self.surfaces.prepare(id_in).assign(Arc::new(surface));
+            Ok(id)
+        } else {
+            Err(CreateSurfaceError::FailedToCreateSurfaceForAnyBackend(
+                errors,
+            ))
+        }
+    }
+
+    pub unsafe fn instance_create_surface_direct_display(
+        &self,
+        direct_display_mode: DirectDisplayMode,
+        id_in: Option<SurfaceId>,
+    ) -> Result<SurfaceId, CreateSurfaceError> {
+        profiling::scope!("Instance::create_surface_direct_display");
+
+        let mut errors = HashMap::default();
+        let mut any_created = false;
+
+        let surface = Surface {
+            presentation: Mutex::new(rank::SURFACE_PRESENTATION, None),
+            info: ResourceInfo::new("<Surface>", None),
+
+            #[cfg(vulkan)]
+            vulkan: {
+                let backend = Backend::Vulkan;
+                let inst = &self.instance.vulkan;
+                inst.as_ref().and_then(|inst| {
+                    match unsafe { inst.create_surface_direct_display(direct_display_mode) } {
+                        Ok(raw) => {
+                            any_created = true;
+                            Some(raw)
+                        }
+                        Err(err) => {
+                            log::debug!(
+                                "Instance::create_surface: failed to create surface for {:?}: {:?}",
+                                backend,
+                                err
+                            );
+                            errors.insert(backend, err);
+                            None
+                        }
+                    }
+                })
+            },
+            #[cfg(metal)]
+            metal: None,
+            #[cfg(dx12)]
+            dx12: None,
+            #[cfg(gles)]
+            gl: None,
         };
 
         if any_created {
