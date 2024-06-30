@@ -1075,6 +1075,13 @@ impl crate::context::Context for ContextWebGpu {
         target: SurfaceTargetUnsafe,
     ) -> Result<(Self::SurfaceId, Self::SurfaceData), crate::CreateSurfaceError> {
         match target {
+            SurfaceTargetUnsafe::DirectDisplay(_) => {
+                return Err(crate::CreateSurfaceError {
+                    inner: crate::CreateSurfaceErrorKind::Web(
+                        String::from("DirectDisplay not supported on Web platform.")
+                    )
+                });
+            }
             SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: _,
                 raw_window_handle,
