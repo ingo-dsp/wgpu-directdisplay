@@ -1,7 +1,6 @@
 #![allow(unused_variables)]
 
 use std::ops::Range;
-use wgt::DirectDisplayMode;
 use crate::InstanceError;
 
 #[derive(Clone, Debug)]
@@ -54,7 +53,7 @@ impl crate::Instance<Api> for Context {
     }
     unsafe fn create_surface_direct_display(
         &self,
-        mode: DirectDisplayMode
+        mode: wgt::DirectDisplayMode
     ) -> Result<Context, crate::InstanceError> {
         Ok(Context)
     }

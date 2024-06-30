@@ -91,7 +91,7 @@ use std::{
 use bitflags::bitflags;
 use parking_lot::Mutex;
 use thiserror::Error;
-use wgt::{DirectDisplayMode, WasmNotSendSync};
+use wgt::WasmNotSendSync;
 
 // - Vertex + Fragment
 // - Compute
@@ -225,7 +225,7 @@ pub trait Instance<A: Api>: Sized + WasmNotSendSync {
     ) -> Result<A::Surface, InstanceError>;
     unsafe fn create_surface_direct_display(
         &self,
-        mode: DirectDisplayMode,
+        mode: wgt::DirectDisplayMode,
     ) -> Result<A::Surface, InstanceError>;
     unsafe fn destroy_surface(&self, surface: A::Surface);
     unsafe fn enumerate_adapters(&self) -> Vec<ExposedAdapter<A>>;

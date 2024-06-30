@@ -549,6 +549,11 @@ impl crate::Instance<super::Api> for Instance {
             srgb_capable: self.srgb_capable,
         })
     }
+    unsafe fn create_surface_direct_display(&self, mode: wgt::DirectDisplayMode) -> Result<Surface, crate::InstanceError> {
+        Err(crate::InstanceError::new(format!(
+            "Direct Display output is not implemented for WGL"
+        )))
+    }
     unsafe fn destroy_surface(&self, _surface: Surface) {}
 
     unsafe fn enumerate_adapters(&self) -> Vec<crate::ExposedAdapter<super::Api>> {
