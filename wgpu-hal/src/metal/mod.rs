@@ -116,7 +116,7 @@ impl crate::Instance<Api> for Instance {
         }
     }
 
-    unsafe fn create_surface_direct_display(&self, mode: DirectDisplayMode) -> Result<<Self::A as crate::Api>::Surface, InstanceError> {
+    unsafe fn create_surface_direct_display(&self, mode: DirectDisplayMode) -> Result<Surface, crate::InstanceError> {
         Err(crate::InstanceError::new(format!(
             "Direct Display output is not implemented for metal"
         )))

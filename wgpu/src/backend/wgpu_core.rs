@@ -531,7 +531,7 @@ impl crate::Context for ContextWgpuCore {
             },
 
             SurfaceTargetUnsafe::DirectDisplay(direct_display_mode) => {
-                self.0.instance_create_surface_direct_display(direct_display_mode, None)
+                self.0.instance_create_surface_direct_display(direct_display_mode, ())?
             }
 
             #[cfg(metal)]

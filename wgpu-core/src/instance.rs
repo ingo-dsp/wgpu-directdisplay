@@ -533,56 +533,35 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub unsafe fn instance_create_surface_direct_display(
         &self,
         direct_display_mode: DirectDisplayMode,
-        id_in: Option<SurfaceId>,
-    ) -> Result<SurfaceId, CreateSurfaceError> {
+        id_in: Input<G, SurfaceId>,
+    ) -> Result<SurfaceId, hal::InstanceError> {
         profiling::scope!("Instance::create_surface_direct_display");
 
-        let mut errors = HashMap::default();
-        let mut any_created = false;
+        let mut hal_surface: Option<Result<AnySurface, hal::InstanceError>> = None;
+
+        #[cfg(vulkan)]
+        if hal_surface.is_none() {
+            let inst = &self.instance.vulkan;
+            hal_surface =
+                inst.as_ref().map(|inst| unsafe {
+                    match inst.create_surface_direct_display(direct_display_mode) {
+                        Ok(raw) => Ok(AnySurface::new(HalSurface::<hal::api::Vulkan> { raw: Arc::new(raw) })),
+                        Err(e) => Err(e),
+                    }
+                });
+        }
+
+        //  This is only None if there's no instance at all.
+        let hal_surface = hal_surface.unwrap()?;
 
         let surface = Surface {
-            presentation: Mutex::new(rank::SURFACE_PRESENTATION, None),
-            info: ResourceInfo::new("<Surface>", None),
-
-            #[cfg(vulkan)]
-            vulkan: {
-                let backend = Backend::Vulkan;
-                let inst = &self.instance.vulkan;
-                inst.as_ref().and_then(|inst| {
-                    match unsafe { inst.create_surface_direct_display(direct_display_mode) } {
-                        Ok(raw) => {
-                            any_created = true;
-                            Some(raw)
-                        }
-                        Err(err) => {
-                            log::debug!(
-                                "Instance::create_surface: failed to create surface for {:?}: {:?}",
-                                backend,
-                                err
-                            );
-                            errors.insert(backend, err);
-                            None
-                        }
-                    }
-                })
-            },
-            #[cfg(metal)]
-            metal: None,
-            #[cfg(dx12)]
-            dx12: None,
-            #[cfg(gles)]
-            gl: None,
+            presentation: Mutex::new(None),
+            info: ResourceInfo::new("<Surface>"),
+            raw: hal_surface,
         };
 
-        if any_created {
-            #[allow(clippy::arc_with_non_send_sync)]
-            let (id, _) = self.surfaces.prepare(id_in).assign(Arc::new(surface));
-            Ok(id)
-        } else {
-            Err(CreateSurfaceError::FailedToCreateSurfaceForAnyBackend(
-                errors,
-            ))
-        }
+        let (id, _) = self.surfaces.prepare::<G>(id_in).assign(surface);
+        Ok(id)
     }
 
     /// # Safety

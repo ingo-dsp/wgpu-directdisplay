@@ -1986,7 +1986,7 @@ impl Instance {
         let target = target.into();
         let mut surface = match target {
             SurfaceTarget::DirectDisplay(direct_display_mode) => unsafe {
-                handle_source = None;
+                handle_origin = None;
                 self.create_surface_unsafe(
                     SurfaceTargetUnsafe::DirectDisplay(direct_display_mode)
                 )?
