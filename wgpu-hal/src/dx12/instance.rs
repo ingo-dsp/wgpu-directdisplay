@@ -127,7 +127,7 @@ impl crate::Instance<super::Api> for super::Instance {
             ))),
         }
     }
-    unsafe fn create_surface_direct_display(&self, mode: wgt::DirectDisplayMode) -> Result<Surface, crate::InstanceError> {
+    unsafe fn create_surface_direct_display(&self, mode: wgt::DirectDisplayMode) -> Result<super::Surface, crate::InstanceError> {
         Err(crate::InstanceError::new(format!(
             "Direct Display output is not implemented for DirectX 12"
         )))
