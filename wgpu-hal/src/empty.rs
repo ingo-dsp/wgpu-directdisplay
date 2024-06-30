@@ -3,7 +3,6 @@
 use std::ops::Range;
 use wgt::DirectDisplayMode;
 use crate::InstanceError;
-use crate::vulkan::Surface;
 
 #[derive(Clone, Debug)]
 pub struct Api;
