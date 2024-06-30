@@ -18,6 +18,7 @@ use std::{num::NonZeroU32, ops::Range};
 pub mod assertions;
 pub mod math;
 
+#[derive(Debug, Copy, Clone)]
 pub struct DirectDisplayMode {
     pub display_index: usize,
     pub display_mode_requested_size: (u32, u32),
