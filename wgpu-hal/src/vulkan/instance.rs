@@ -10,6 +10,7 @@ use ash::{
     extensions::{ext, khr},
     vk,
 };
+use ash::vk::SurfaceTransformFlagsKHR;
 use parking_lot::RwLock;
 use wgt::DirectDisplayMode;
 
@@ -829,6 +830,7 @@ impl crate::Instance<super::Api> for super::Instance {
             &ash::vk::DisplaySurfaceCreateInfoKHR::builder()
                 .plane_index(PLANE_ID as u32)
                 .display_mode(display_mode)
+                .transform(SurfaceTransformFlagsKHR::IDENTITY)
                 .image_extent(selected_mode.parameters.visible_region)
                 .build(),
             None
