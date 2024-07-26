@@ -66,7 +66,8 @@ impl super::Surface {
             swapchain_format: RwLock::new(None),
             extent: RwLock::new(wgt::Extent3d::default()),
             main_thread_id: thread::current().id(),
-            present_with_transaction: false,
+            // NB: Changed to true on branch `directdisplay/v0.19.4+vulkan+egl+metal`!
+            present_with_transaction: true,
         }
     }
 
