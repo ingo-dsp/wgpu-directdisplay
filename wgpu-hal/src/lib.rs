@@ -223,6 +223,10 @@ pub trait Instance<A: Api>: Sized + WasmNotSendSync {
         display_handle: raw_window_handle::RawDisplayHandle,
         window_handle: raw_window_handle::RawWindowHandle,
     ) -> Result<A::Surface, InstanceError>;
+    unsafe fn create_surface_direct_display(
+        &self,
+        mode: wgt::DirectDisplayMode,
+    ) -> Result<A::Surface, InstanceError>;
     unsafe fn destroy_surface(&self, surface: A::Surface);
     unsafe fn enumerate_adapters(&self) -> Vec<ExposedAdapter<A>>;
 }

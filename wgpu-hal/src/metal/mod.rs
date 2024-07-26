@@ -36,6 +36,7 @@ use arrayvec::ArrayVec;
 use bitflags::bitflags;
 use metal::foreign_types::ForeignTypeRef as _;
 use parking_lot::{Mutex, RwLock};
+use crate::InstanceError;
 
 #[derive(Clone, Debug)]
 pub struct Api;
@@ -112,6 +113,12 @@ impl crate::Instance<Api> for Instance {
                 "window handle {window_handle:?} is not a Metal-compatible handle"
             ))),
         }
+    }
+
+    unsafe fn create_surface_direct_display(&self, mode: wgt::DirectDisplayMode) -> Result<Surface, crate::InstanceError> {
+        Err(crate::InstanceError::new(format!(
+            "Direct Display output is not implemented for Metal"
+        )))
     }
 
     unsafe fn destroy_surface(&self, surface: Surface) {

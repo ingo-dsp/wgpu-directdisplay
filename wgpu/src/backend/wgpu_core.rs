@@ -530,6 +530,10 @@ impl crate::Context for ContextWgpuCore {
                     .instance_create_surface(raw_display_handle, raw_window_handle, ())?
             },
 
+            SurfaceTargetUnsafe::DirectDisplay(direct_display_mode) => {
+                self.0.instance_create_surface_direct_display(direct_display_mode, ())?
+            }
+            
             #[cfg(metal)]
             SurfaceTargetUnsafe::CoreAnimationLayer(layer) => unsafe {
                 self.0.instance_create_surface_metal(layer, ())

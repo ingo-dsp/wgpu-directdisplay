@@ -14,8 +14,7 @@ use crate::{
 };
 
 use parking_lot::Mutex;
-use wgt::{Backend, Backends, PowerPreference};
-
+use wgt::{Backend, Backends, DirectDisplayMode, PowerPreference};
 use hal::{Adapter as _, Instance as _, OpenDevice};
 use thiserror::Error;
 
@@ -515,6 +514,40 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         #[cfg(gles)]
         if hal_surface.is_none() {
             hal_surface = init::<hal::api::Gles>(&self.instance.gl, display_handle, window_handle);
+        }
+
+        //  This is only None if there's no instance at all.
+        let hal_surface = hal_surface.unwrap()?;
+
+        let surface = Surface {
+            presentation: Mutex::new(None),
+            info: ResourceInfo::new("<Surface>"),
+            raw: hal_surface,
+        };
+
+        let (id, _) = self.surfaces.prepare::<G>(id_in).assign(surface);
+        Ok(id)
+    }
+
+    pub unsafe fn instance_create_surface_direct_display(
+        &self,
+        direct_display_mode: DirectDisplayMode,
+        id_in: Input<G, SurfaceId>,
+    ) -> Result<SurfaceId, hal::InstanceError> {
+        profiling::scope!("Instance::create_surface_direct_display");
+
+        let mut hal_surface: Option<Result<AnySurface, hal::InstanceError>> = None;
+
+        #[cfg(vulkan)]
+        if hal_surface.is_none() {
+            let inst = &self.instance.vulkan;
+            hal_surface =
+                inst.as_ref().map(|inst| unsafe {
+                    match inst.create_surface_direct_display(direct_display_mode) {
+                        Ok(raw) => Ok(AnySurface::new(HalSurface::<hal::api::Vulkan> { raw: Arc::new(raw) })),
+                        Err(e) => Err(e),
+                    }
+                });
         }
 
         //  This is only None if there's no instance at all.

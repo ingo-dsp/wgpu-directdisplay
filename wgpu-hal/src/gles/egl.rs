@@ -2,6 +2,7 @@ use glow::HasContext;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use std::{ffi, os::raw, ptr, rc::Rc, sync::Arc, time::Duration};
+use crate::InstanceError;
 
 /// The amount of time to wait while trying to obtain a lock to the adapter context
 const CONTEXT_LOCK_TIMEOUT_SECS: u64 = 1;
@@ -972,6 +973,13 @@ impl crate::Instance<super::Api> for Instance {
         .into_iter()
         .collect()
     }
+
+    unsafe fn create_surface_direct_display(&self, mode: wgt::DirectDisplayMode) -> Result<Surface, crate::InstanceError> {
+        Err(crate::InstanceError::new(format!(
+            "Direct Display output is not implemented for EGL"
+        )))
+    }
+
 }
 
 impl super::Adapter {

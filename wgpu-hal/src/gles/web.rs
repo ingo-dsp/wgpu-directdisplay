@@ -170,6 +170,12 @@ impl crate::Instance<super::Api> for Instance {
         self.create_surface_from_canvas(canvas)
     }
 
+    unsafe fn create_surface_direct_display(&self, mode: wgt::DirectDisplayMode) -> Result<Surface, crate::InstanceError> {
+        Err(crate::InstanceError::new(format!(
+            "Direct Display output is not implemented for Web"
+        )))
+    }
+
     unsafe fn destroy_surface(&self, surface: Surface) {
         let mut context_option_ref = self.webgl2_context.lock();
 
