@@ -114,6 +114,11 @@ impl super::Surface {
             panic!("get_metal_layer cannot be called in non-ui thread.");
         }
 
+        // ADDED BY INGO:
+        // Workaround to prevent "main_layer" from being null in the next line,
+        // causing crash due to null pointer access afterwards.
+        let () = msg_send![view, setWantsLayer: YES];
+
         let main_layer: *mut Object = msg_send![view, layer];
         let class = class!(CAMetalLayer);
         let is_valid_layer: BOOL = msg_send![main_layer, isKindOfClass: class];
